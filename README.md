@@ -20,4 +20,4 @@ None for this milestone. Do not place API keys in the Android app. Future model 
 
 ## Scope and next gate
 
-The probe must pass on both an emulator and the Huawei Mate 40 Pro (HarmonyOS 4.2) before agent logic is added. The probe does not run in the background or prove non-interference yet. Next: ingest explicitly shared notices, reconcile changes against current calendar state, then verify the final record without touching the foreground screen or keyboard.
+Verified on an Android 15 / API 35 emulator: a disposable local calendar was discovered; event creation, read-back, duplicate prevention, and deletion all passed. The Huawei Mate 40 Pro (HarmonyOS 4.2) remains untested. This probe does not run in the background or prove non-interference yet. Next: validate the Huawei calendar provider, then ingest explicitly shared notices, reconcile changes against current calendar state, and verify the final record without touching the foreground screen or keyboard.
