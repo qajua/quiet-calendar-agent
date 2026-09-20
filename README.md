@@ -22,6 +22,8 @@ python3 tools/quiet_cli.py cleanup --task-id demo-001
 
 Use a **new task ID** each time. For deduplication, repeat `create` with the same ID and the same fixed `--start` timestamp (`--in-minutes` recalculates on each run). The CLI defaults to the USB phone; add `--target emulator` for an emulator. It obtains a random token from the debug app's private storage via ADB `run-as`; no token is committed to Git.
 
+For a filmed simultaneous-use test, run `python3 tools/live_demo.py --calendar-id 1` while the phone is unlocked. You have 10 seconds to switch to a chat app and keep typing. The script checks the foreground app and independently reads every event field, saves a local record under ignored `work/demo-proofs/`, and prints a separate cleanup command. **Record the phone and terminal together; the automated record cannot prove the keyboard never flickered.**
+
 ## Scope and decisions
 
 Validated on Android 15 emulator and Huawei Mate 40 Pro / HarmonyOS 4.2: create, independent read-back, same-ID replay, and guarded cleanup. Huawei blocked background broadcasts, so the debug bridge uses a synchronous ContentProvider call; it starts the app process without opening its Activity. The provider exists **only in debug builds**. Calendar writes are tagged by task ID; cleanup refuses to delete a record whose fields changed.
