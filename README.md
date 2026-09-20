@@ -1,23 +1,31 @@
 # Quiet Calendar Agent
 
-An Android proof of concept for a phone agent that completes calendar work while the phone owner uses other apps. **Current milestone:** a reversible on-device calendar compatibility probe. Image understanding, background execution, and remote triggering are not implemented yet.
+Debug-stage Android proof of concept: a computer asks the **same phone** to create a calendar event while another app remains foreground. The phone writes through Calendar Provider, reads the record back, and returns a task result. No screen taps, accessibility service, or keyboard injection are used.
 
 ```text
-Future: task console → planner → Android app → Calendar Provider → read-back proof
-Current: Android probe UI ──────────────→ Calendar Provider → read-back proof
+Desktop CLI ─ADB content call─> debug-only provider ─> Calendar Provider
+     ↑                       └─ verified result in app-private file ─┘
 ```
 
-## Build and run
+## Deploy and verify
 
-1. Install JDK 17 and Android SDK platform 35/build-tools 35.0.0. Set `ANDROID_HOME` to the SDK directory.
-2. Run `./gradlew :app:assembleDebug`.
-3. Start an Android emulator or connect an Android phone with USB debugging. Check `adb devices`, then run `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
-4. Open **Quiet Calendar Agent**. Grant calendar permissions, inspect the list of writable calendars, choose one, create the test event, verify it, and delete it. Nothing is written before you tap **Create**.
+1. Install JDK 17 and Android SDK platform/build-tools 35; set `ANDROID_HOME`. Run `./gradlew :app:assembleDebug`.
+2. Connect one USB-debugging Android phone (`adb devices`) and run `adb -d install -r app/build/outputs/apk/debug/app-debug.apk`. Open the app **once** to grant calendar permissions; then switch to a chat or feed app.
+3. `python3 tools/quiet_cli.py calendars` lists calendar IDs and access levels; choose a writable, disposable calendar where possible (access level ≥ 500). Run the commands below while continuing to use the phone:
 
-## Environment variables
+```bash
+python3 tools/quiet_cli.py create --task-id demo-001 --calendar-id 1 \
+  --title "Quiet demo" --in-minutes 120 --minutes 30
+python3 tools/quiet_cli.py status --task-id demo-001
+python3 tools/quiet_cli.py cleanup --task-id demo-001
+```
 
-None for this milestone. Do not place API keys in the Android app. Future model and relay secrets will be configured server-side.
+Use a **new task ID** each time. For deduplication, repeat `create` with the same ID and the same fixed `--start` timestamp (`--in-minutes` recalculates on each run). The CLI defaults to the USB phone; add `--target emulator` for an emulator. It obtains a random token from the debug app's private storage via ADB `run-as`; no token is committed to Git.
 
-## Scope and next gate
+## Scope and decisions
 
-Verified on an Android 15 / API 35 emulator: a disposable local calendar was discovered; event creation, read-back, duplicate prevention, and deletion all passed. The Huawei Mate 40 Pro (HarmonyOS 4.2) remains untested. This probe does not run in the background or prove non-interference yet. Next: validate the Huawei calendar provider, then ingest explicitly shared notices, reconcile changes against current calendar state, and verify the final record without touching the foreground screen or keyboard.
+Validated on Android 15 emulator and Huawei Mate 40 Pro / HarmonyOS 4.2: create, independent read-back, same-ID replay, and guarded cleanup. Huawei blocked background broadcasts, so the debug bridge uses a synchronous ContentProvider call; it starts the app process without opening its Activity. The provider exists **only in debug builds**. Calendar writes are tagged by task ID; cleanup refuses to delete a record whose fields changed.
+
+This is not yet a natural-language agent, durable queue, or proof of uninterrupted typing. A filmed test with a person actively using the phone is the next acceptance gate. Do not expose this debug bridge as a production API; a production transport needs proper authentication and scheduling. No model/API environment variables are required yet.
+
+Environment: `ANDROID_HOME` points to the Android SDK; `JAVA_HOME` points to JDK 17. The CLI uses `ANDROID_HOME/platform-tools/adb` or an `adb` on `PATH`. No secret environment variables are needed.

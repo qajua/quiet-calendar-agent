@@ -1,0 +1,227 @@
+package dev.qajua.quietcalendar
+
+import android.Manifest
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.provider.CalendarContract
+import android.util.AtomicFile
+import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.TimeZone
+
+/** Debug-only task logic. No Activity is launched and only tagged events can be cleaned up. */
+internal class DebugTaskStore(private val context: Context) {
+    private val resolver = context.contentResolver
+
+    fun bootstrap() { synchronized(LOCK) { ensureToken() } }
+
+    fun authorize(presented: String?): Boolean {
+        if (presented == null) return false
+        return synchronized(LOCK) {
+            MessageDigest.isEqual(ensureToken().toByteArray(), presented.toByteArray())
+        }
+    }
+
+    fun report(id: String): JSONObject? = synchronized(LOCK) {
+        if (TASK_ID.matches(id)) read(id) else null
+    }
+
+    fun handle(intent: Intent) {
+        synchronized(LOCK) { handleLocked(intent) }
+    }
+
+    private fun handleLocked(intent: Intent) {
+        if (!authorize(intent.getStringExtra("bridge_token"))) return
+        val id = intent.getStringExtra("task_id") ?: return
+        if (!TASK_ID.matches(id)) return
+        val commandId = intent.getStringExtra("command_id") ?: return
+        if (!TASK_ID.matches(commandId)) return
+        try {
+            requirePermissions()
+            when (intent.action) {
+                ACTION_CREATE -> create(id, commandId, intent)
+                ACTION_CLEANUP -> cleanup(id, commandId)
+                else -> error("Unknown command")
+            }
+        } catch (error: Exception) {
+            val old = read(id)
+            val report = old ?: JSONObject().put("task_id", id)
+            report.put("state", "failed")
+            report.put("command_id", commandId)
+            report.put("error", error.message ?: error.javaClass.simpleName)
+            write(id, report)
+        }
+    }
+
+    private fun create(id: String, commandId: String, intent: Intent) {
+        val calendarId = intent.getLongExtra("calendar_id", -1L)
+        val start = intent.getLongExtra("start_ms", -1L)
+        val minutes = intent.getIntExtra("minutes", -1)
+        val title = intent.getStringExtra("title")?.trim().orEmpty()
+        require(calendarId > 0) { "Invalid calendar ID" }
+        require(start > 0) { "Invalid start time" }
+        require(minutes in 1..1440) { "Duration must be 1–1440 minutes" }
+        require(title.length in 1..200) { "Title must be 1–200 characters" }
+        val end = start + minutes * 60_000L
+        require(end > start) { "Invalid end time" }
+
+        val previous = read(id)
+        check(previous?.optString("state") != "deleted") { "Task was already cleaned up; use a new ID" }
+        if (previous != null && previous.has("calendar_id")) {
+            check(previous.optLong("calendar_id") == calendarId &&
+                previous.optLong("start_ms") == start &&
+                previous.optLong("end_ms") == end &&
+                previous.optString("title") == title) { "Task ID was used with different fields" }
+        }
+
+        val calendar = resolver.query(
+            CalendarContract.Calendars.CONTENT_URI,
+            arrayOf(CalendarContract.Calendars._ID),
+            "${CalendarContract.Calendars._ID}=? AND ${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL}>=?",
+            arrayOf(calendarId.toString(), CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR.toString()),
+            null,
+        )?.use { it.moveToFirst() } ?: false
+        check(calendar) { "Calendar is not writable" }
+
+        val marker = marker(id)
+        var eventId = findByMarker(calendarId, marker)
+        val replayed = eventId != null
+        if (eventId == null) {
+            check(previous?.has("event_id") != true) { "Previously recorded event is missing; use a new ID" }
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.CALENDAR_ID, calendarId)
+                put(CalendarContract.Events.TITLE, title)
+                put(CalendarContract.Events.DESCRIPTION, marker)
+                put(CalendarContract.Events.DTSTART, start)
+                put(CalendarContract.Events.DTEND, end)
+                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+            }
+            val uri = checkNotNull(resolver.insert(CalendarContract.Events.CONTENT_URI, values)) {
+                "Calendar refused event insertion"
+            }
+            eventId = ContentUris.parseId(uri)
+        }
+        verify(eventId, calendarId, title, start, end, marker)
+        write(id, JSONObject().apply {
+            put("task_id", id)
+            put("command_id", commandId)
+            put("state", "complete")
+            put("event_id", eventId)
+            put("calendar_id", calendarId)
+            put("title", title)
+            put("start_ms", start)
+            put("end_ms", end)
+            put("replayed", replayed)
+        })
+    }
+
+    private fun cleanup(id: String, commandId: String) {
+        val previous = checkNotNull(read(id)) { "Unknown task ID" }
+        if (previous.optString("state") == "deleted") {
+            previous.put("command_id", commandId)
+            previous.put("replayed", true)
+            write(id, previous)
+            return
+        }
+        val eventId = previous.optLong("event_id", -1L)
+        check(eventId > 0) { "No recorded event to clean up" }
+        val calendarId = previous.getLong("calendar_id")
+        verify(
+            eventId, calendarId, previous.getString("title"),
+            previous.getLong("start_ms"), previous.getLong("end_ms"), marker(id),
+        )
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        check(resolver.delete(uri, null, null) == 1) { "Calendar did not delete the event" }
+        check(findByMarker(calendarId, marker(id)) == null) { "Event still exists after deletion" }
+        previous.put("state", "deleted")
+        previous.put("command_id", commandId)
+        previous.put("replayed", false)
+        previous.remove("error")
+        write(id, previous)
+    }
+
+    private fun findByMarker(calendarId: Long, marker: String): Long? {
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            arrayOf(CalendarContract.Events._ID),
+            "${CalendarContract.Events.CALENDAR_ID}=? AND ${CalendarContract.Events.DESCRIPTION}=?",
+            arrayOf(calendarId.toString(), marker),
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val id = cursor.getLong(0)
+            check(!cursor.moveToNext()) { "Multiple events have the same task marker" }
+            return id
+        }
+        return null
+    }
+
+    private fun verify(
+        eventId: Long, calendarId: Long, title: String, start: Long, end: Long, marker: String,
+    ) {
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        resolver.query(
+            uri,
+            arrayOf(
+                CalendarContract.Events.CALENDAR_ID, CalendarContract.Events.TITLE,
+                CalendarContract.Events.DTSTART, CalendarContract.Events.DTEND,
+                CalendarContract.Events.DESCRIPTION,
+            ),
+            null, null, null,
+        )?.use { cursor ->
+            check(cursor.moveToFirst()) { "Event not found on read-back" }
+            check(cursor.getLong(0) == calendarId && cursor.getString(1) == title &&
+                cursor.getLong(2) == start && cursor.getLong(3) == end &&
+                cursor.getString(4) == marker) { "Event changed; refusing to claim success or delete" }
+            return
+        }
+        error("Calendar read-back failed")
+    }
+
+    private fun requirePermissions() {
+        check(context.checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
+            context.checkSelfPermission(Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED) {
+            "Open the app once and grant calendar permissions"
+        }
+    }
+
+    private fun marker(id: String): String = "[Quiet Calendar Agent task:$id]"
+
+    private fun ensureToken(): String {
+        val file = File(context.filesDir, "bridge-token.txt")
+        if (!file.exists()) {
+            val bytes = ByteArray(32)
+            SecureRandom().nextBytes(bytes)
+            file.writeText(bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) })
+        }
+        return file.readText().trim()
+    }
+
+    private fun file(id: String): File = File(context.filesDir, "task-$id.json")
+
+    private fun read(id: String): JSONObject? = file(id).takeIf { it.exists() }?.readText()?.let(::JSONObject)
+
+    private fun write(id: String, report: JSONObject) {
+        val atomic = AtomicFile(file(id))
+        val stream = atomic.startWrite()
+        try {
+            stream.write(report.toString().toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+        } catch (error: Exception) {
+            atomic.failWrite(stream)
+            throw error
+        }
+    }
+
+    private companion object {
+        val LOCK = Any()
+        val TASK_ID = Regex("[A-Za-z0-9_-]{1,64}")
+        const val ACTION_CREATE = "dev.qajua.quietcalendar.CREATE_TASK"
+        const val ACTION_CLEANUP = "dev.qajua.quietcalendar.CLEANUP_TASK"
+    }
+}
