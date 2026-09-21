@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import json
+import io
 import unittest
+import urllib.error
 from unittest import mock
 
-from planner import openai_plan, plan_notice, ready_timestamps, validate_plan
+from planner import _safe_http_error, openai_plan, plan_notice, ready_timestamps, validate_plan
 
 
 READY = {
@@ -88,6 +90,21 @@ class PlannerTest(unittest.TestCase):
             )
         self.assertEqual(source, "deterministic")
         self.assertEqual(plan["status"], "ready")
+
+    def test_http_error_does_not_echo_key_fragment(self):
+        error = urllib.error.HTTPError(
+            "https://api.openai.com/v1/responses", 401, "Unauthorized", {},
+            io.BytesIO(json.dumps({
+                "error": {
+                    "message": "Incorrect API key provided: sk-proj-secret-fragment",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            }).encode()),
+        )
+        message = _safe_http_error(error)
+        self.assertIn("HTTP 401", message)
+        self.assertNotIn("secret-fragment", message)
 
 
 if __name__ == "__main__":

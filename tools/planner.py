@@ -90,6 +90,26 @@ def _parse_iso(value, field):
     return moment
 
 
+def _safe_http_error(error):
+    """Keep API diagnostics useful without echoing request-derived secret fragments."""
+    try:
+        body = error.read(4096).decode("utf-8", errors="replace")
+    finally:
+        error.close()
+    try:
+        details = json.loads(body).get("error", {})
+    except json.JSONDecodeError:
+        details = {}
+    code = details.get("code")
+    kind = details.get("type")
+    suffix = ", ".join(value for value in (code, kind) if isinstance(value, str))
+    if error.code == 401:
+        return "OpenAI API 认证失败（HTTP 401）；请检查密钥是否有效、未撤销且没有多余字符"
+    if suffix:
+        return f"OpenAI API 返回 HTTP {error.code}（{suffix}）"
+    return f"OpenAI API 返回 HTTP {error.code}"
+
+
 def validate_plan(plan):
     if not isinstance(plan, dict):
         raise ValueError("规划结果必须是对象")
@@ -178,8 +198,7 @@ def openai_plan(text, timezone, reference_time, model, api_key, timeout=30, url=
         with urllib.request.urlopen(request, timeout=timeout) as result:
             response = json.loads(result.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        body = error.read(4096).decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI API 返回 HTTP {error.code}: {body}") from error
+        raise RuntimeError(_safe_http_error(error)) from error
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise RuntimeError(f"OpenAI API 请求失败：{error}") from error
     if response.get("status") not in {None, "completed"}:
