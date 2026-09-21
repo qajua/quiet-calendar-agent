@@ -140,14 +140,15 @@ def main():
                 raise RuntimeError("该改期任务已撤销；如需再次改期请使用新任务 ID")
             if existing.get("state") != "complete":
                 raise RuntimeError(existing.get("error", "既有任务未成功完成"))
-            proof["result"] = existing
+            replay_report = {**existing, "replayed": True}
+            proof["result"] = replay_report
             proof["after"] = read_snapshot(args, existing["event_id"])
             if int(proof["after"]["dtstart"]) != new_start or int(proof["after"]["dtend"]) != expected_new_end:
                 raise RuntimeError("既有任务记录与当前日历不一致；停止操作")
             proof["verified"] = True
             proof["replayed"] = True
             print("同一任务已完成；独立回读仍与通知一致：")
-            print(json.dumps(existing, ensure_ascii=False, indent=2))
+            print(json.dumps(replay_report, ensure_ascii=False, indent=2))
             print(f"撤销命令：python3 tools/quiet_cli.py undo --task-id {args.task_id}")
             return_code = 0
         else:
