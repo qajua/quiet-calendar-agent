@@ -94,7 +94,7 @@ def send_report(args, action, task_id, fields):
 def send(args, action, task_id, fields):
     report = send_report(args, action, task_id, fields)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if report.get("state") in {"complete", "deleted"} else 1
+    return 0 if report.get("state") in {"complete", "deleted", "undone"} else 1
 
 
 def main():
@@ -115,6 +115,8 @@ def main():
     create.add_argument("--minutes", type=int, default=30)
     cleanup = sub.add_parser("cleanup", help="Delete only this task's unchanged event")
     cleanup.add_argument("--task-id", required=True)
+    undo = sub.add_parser("undo", help="Undo an unchanged reschedule task")
+    undo.add_argument("--task-id", required=True)
     status = sub.add_parser("status", help="Read a task result without touching the phone UI")
     status.add_argument("--task-id", required=True)
     args = parser.parse_args()
@@ -137,6 +139,8 @@ def main():
             return 0
         if args.action == "cleanup":
             return send(args, "cleanup", task_id, {})
+        if args.action == "undo":
+            return send(args, "undo", task_id, {})
         if args.in_minutes is not None:
             if args.in_minutes < 1 or args.in_minutes > 525_600:
                 raise ValueError("--in-minutes must be 1–525600")

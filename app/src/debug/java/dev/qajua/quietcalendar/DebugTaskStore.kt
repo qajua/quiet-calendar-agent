@@ -46,6 +46,8 @@ internal class DebugTaskStore(private val context: Context) {
             when (intent.action) {
                 ACTION_CREATE -> create(id, commandId, intent)
                 ACTION_CLEANUP -> cleanup(id, commandId)
+                ACTION_RESCHEDULE -> reschedule(id, commandId, intent)
+                ACTION_UNDO -> undo(id, commandId)
                 else -> error("Unknown command")
             }
         } catch (error: Exception) {
@@ -145,6 +147,103 @@ internal class DebugTaskStore(private val context: Context) {
         write(id, previous)
     }
 
+    private fun reschedule(id: String, commandId: String, intent: Intent) {
+        val eventId = intent.getLongExtra("event_id", -1L)
+        val calendarId = intent.getLongExtra("calendar_id", -1L)
+        val ownerTaskId = intent.getStringExtra("owner_task_id").orEmpty()
+        val title = intent.getStringExtra("title")?.trim().orEmpty()
+        val oldStart = intent.getLongExtra("expected_start_ms", -1L)
+        val oldEnd = intent.getLongExtra("expected_end_ms", -1L)
+        val newStart = intent.getLongExtra("new_start_ms", -1L)
+        val newEnd = intent.getLongExtra("new_end_ms", -1L)
+        require(eventId > 0 && calendarId > 0) { "Invalid event or calendar ID" }
+        require(TASK_ID.matches(ownerTaskId)) { "Invalid owner task ID" }
+        require(title.length in 1..200) { "Title must be 1–200 characters" }
+        require(oldStart > 0 && oldEnd > oldStart && newStart > 0 && newEnd > newStart) {
+            "Invalid original or new time range"
+        }
+
+        val previous = read(id)
+        check(previous?.optString("state") != "undone") { "Task was already undone; use a new ID" }
+        if (previous != null && previous.has("event_id")) {
+            check(previous.optLong("event_id") == eventId &&
+                previous.optLong("calendar_id") == calendarId &&
+                previous.optString("owner_task_id") == ownerTaskId &&
+                previous.optString("title") == title &&
+                previous.optLong("original_start_ms") == oldStart &&
+                previous.optLong("original_end_ms") == oldEnd &&
+                previous.optLong("start_ms") == newStart &&
+                previous.optLong("end_ms") == newEnd) { "Task ID was used with different fields" }
+        }
+
+        val eventMarker = marker(ownerTaskId)
+        val alreadyUpdated = matches(eventId, calendarId, title, newStart, newEnd, eventMarker)
+        if (!alreadyUpdated) {
+            check(matches(eventId, calendarId, title, oldStart, oldEnd, eventMarker)) {
+                "Event changed since planning; refusing to update"
+            }
+            val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.DTSTART, newStart)
+                put(CalendarContract.Events.DTEND, newEnd)
+            }
+            check(resolver.update(uri, values, null, null) == 1) { "Calendar did not update the event" }
+        }
+        verify(eventId, calendarId, title, newStart, newEnd, eventMarker)
+        write(id, JSONObject().apply {
+            put("task_id", id)
+            put("command_id", commandId)
+            put("operation", "reschedule")
+            put("state", "complete")
+            put("event_id", eventId)
+            put("calendar_id", calendarId)
+            put("owner_task_id", ownerTaskId)
+            put("title", title)
+            put("original_start_ms", oldStart)
+            put("original_end_ms", oldEnd)
+            put("start_ms", newStart)
+            put("end_ms", newEnd)
+            put("replayed", alreadyUpdated)
+        })
+    }
+
+    private fun undo(id: String, commandId: String) {
+        val previous = checkNotNull(read(id)) { "Unknown task ID" }
+        check(previous.optString("operation") == "reschedule") { "Task is not a reschedule operation" }
+        if (previous.optString("state") == "undone") {
+            previous.put("command_id", commandId)
+            previous.put("replayed", true)
+            write(id, previous)
+            return
+        }
+        val eventId = previous.getLong("event_id")
+        val calendarId = previous.getLong("calendar_id")
+        val title = previous.getString("title")
+        val eventMarker = marker(previous.getString("owner_task_id"))
+        val oldStart = previous.getLong("original_start_ms")
+        val oldEnd = previous.getLong("original_end_ms")
+        val newStart = previous.getLong("start_ms")
+        val newEnd = previous.getLong("end_ms")
+        val alreadyUndone = matches(eventId, calendarId, title, oldStart, oldEnd, eventMarker)
+        if (!alreadyUndone) {
+            check(matches(eventId, calendarId, title, newStart, newEnd, eventMarker)) {
+                "Event changed after rescheduling; refusing to undo"
+            }
+            val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.DTSTART, oldStart)
+                put(CalendarContract.Events.DTEND, oldEnd)
+            }
+            check(resolver.update(uri, values, null, null) == 1) { "Calendar did not undo the update" }
+        }
+        verify(eventId, calendarId, title, oldStart, oldEnd, eventMarker)
+        previous.put("state", "undone")
+        previous.put("command_id", commandId)
+        previous.put("replayed", alreadyUndone)
+        previous.remove("error")
+        write(id, previous)
+    }
+
     private fun findByMarker(calendarId: Long, marker: String): Long? {
         resolver.query(
             CalendarContract.Events.CONTENT_URI,
@@ -181,6 +280,24 @@ internal class DebugTaskStore(private val context: Context) {
             return
         }
         error("Calendar read-back failed")
+    }
+
+    private fun matches(
+        eventId: Long, calendarId: Long, title: String, start: Long, end: Long, marker: String,
+    ): Boolean {
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        return resolver.query(
+            uri,
+            arrayOf(
+                CalendarContract.Events.CALENDAR_ID, CalendarContract.Events.TITLE,
+                CalendarContract.Events.DTSTART, CalendarContract.Events.DTEND,
+                CalendarContract.Events.DESCRIPTION,
+            ),
+            null, null, null,
+        )?.use { cursor ->
+            cursor.moveToFirst() && cursor.getLong(0) == calendarId && cursor.getString(1) == title &&
+                cursor.getLong(2) == start && cursor.getLong(3) == end && cursor.getString(4) == marker
+        } ?: false
     }
 
     private fun requirePermissions() {
@@ -223,5 +340,7 @@ internal class DebugTaskStore(private val context: Context) {
         val TASK_ID = Regex("[A-Za-z0-9_-]{1,64}")
         const val ACTION_CREATE = "dev.qajua.quietcalendar.CREATE_TASK"
         const val ACTION_CLEANUP = "dev.qajua.quietcalendar.CLEANUP_TASK"
+        const val ACTION_RESCHEDULE = "dev.qajua.quietcalendar.RESCHEDULE_TASK"
+        const val ACTION_UNDO = "dev.qajua.quietcalendar.UNDO_TASK"
     }
 }

@@ -18,16 +18,19 @@ class DebugTaskProvider : ContentProvider() {
             store.bootstrap()
             return Bundle().apply { putString("status", "ready") }
         }
-        require(method == "create" || method == "cleanup") { "Unknown command" }
+        require(method in setOf("create", "cleanup", "reschedule", "undo")) { "Unknown command" }
         val request = JSONObject(checkNotNull(arg) { "Missing JSON request" })
         val token = request.optString("bridge_token")
         check(store.authorize(token)) { "Unauthorized" }
         val taskId = request.getString("task_id")
         val commandId = request.getString("command_id")
-        val intent = Intent(
-            if (method == "create") "dev.qajua.quietcalendar.CREATE_TASK"
-            else "dev.qajua.quietcalendar.CLEANUP_TASK",
-        ).apply {
+        val action = when (method) {
+            "create" -> "dev.qajua.quietcalendar.CREATE_TASK"
+            "cleanup" -> "dev.qajua.quietcalendar.CLEANUP_TASK"
+            "reschedule" -> "dev.qajua.quietcalendar.RESCHEDULE_TASK"
+            else -> "dev.qajua.quietcalendar.UNDO_TASK"
+        }
+        val intent = Intent(action).apply {
             putExtra("bridge_token", token)
             putExtra("task_id", taskId)
             putExtra("command_id", commandId)
@@ -36,6 +39,15 @@ class DebugTaskProvider : ContentProvider() {
                 putExtra("title", request.getString("title"))
                 putExtra("start_ms", request.getLong("start_ms"))
                 putExtra("minutes", request.getInt("minutes"))
+            } else if (method == "reschedule") {
+                putExtra("event_id", request.getLong("event_id"))
+                putExtra("calendar_id", request.getLong("calendar_id"))
+                putExtra("owner_task_id", request.getString("owner_task_id"))
+                putExtra("title", request.getString("title"))
+                putExtra("expected_start_ms", request.getLong("expected_start_ms"))
+                putExtra("expected_end_ms", request.getLong("expected_end_ms"))
+                putExtra("new_start_ms", request.getLong("new_start_ms"))
+                putExtra("new_end_ms", request.getLong("new_end_ms"))
             }
         }
         store.handle(intent)
