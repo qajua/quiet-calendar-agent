@@ -8,44 +8,17 @@ from pathlib import Path
 import re
 import sys
 import uuid
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from planner import parse_notice, plan_notice, ready_timestamps
 from quiet_cli import read_status, run_adb, send_report
 
 
 PROOF_DIR = Path(__file__).resolve().parent.parent / "work" / "notice-proofs"
-NOTICE = re.compile(
-    r"^(?:请)?(?:把|将)\s*[“\"']?(?P<title>.+?)[”\"']?\s*从\s*"
-    r"(?P<old_date>\d{4}-\d{1,2}-\d{1,2})\s+(?P<old_time>\d{1,2}:\d{2})\s*"
-    r"(?:改到|改为|调整到)\s*"
-    r"(?P<new_date>\d{4}-\d{1,2}-\d{1,2})\s+(?P<new_time>\d{1,2}:\d{2})\s*[。！!]?$"
-)
 MARKER = re.compile(r"^\[Quiet Calendar Agent task:([A-Za-z0-9_-]{1,64})]$")
 
 
-def parse_notice(text, timezone):
-    match = NOTICE.fullmatch(text.strip())
-    if not match:
-        raise ValueError(
-            "通知格式无法安全解析；请使用：把项目周会从 2026-09-23 15:00 改到 2026-09-25 16:00"
-        )
-    title = match.group("title").strip().strip("“”\"'")
-    if not title or len(title) > 200:
-        raise ValueError("会议标题必须为 1–200 个字符")
-    try:
-        zone = ZoneInfo(timezone)
-    except ZoneInfoNotFoundError as error:
-        raise ValueError(f"未知时区：{timezone}") from error
-
-    def moment(date, clock):
-        try:
-            return dt.datetime.strptime(f"{date} {clock}", "%Y-%m-%d %H:%M").replace(tzinfo=zone)
-        except ValueError as error:
-            raise ValueError(f"无效日期时间：{date} {clock}") from error
-
-    old = moment(match.group("old_date"), match.group("old_time"))
-    new = moment(match.group("new_date"), match.group("new_time"))
-    return title, int(old.timestamp() * 1000), int(new.timestamp() * 1000)
+class PlanningPaused(Exception):
+    """The plan needs one answer before any phone lookup or write is allowed."""
 
 
 def read_field(args, event_id, column):
@@ -107,8 +80,15 @@ def main():
     parser.add_argument("--adb", help="Path to adb")
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--calendar-id", type=int, required=True)
-    parser.add_argument("--text", required=True, help="Chinese absolute-date reschedule notice")
+    parser.add_argument("--text", required=True, help="Chinese reschedule notice")
     parser.add_argument("--timezone", default="Australia/Sydney")
+    parser.add_argument("--planner", choices=("auto", "deterministic", "openai"), default="auto")
+    parser.add_argument("--model", help="OpenAI model; defaults to OPENAI_MODEL")
+    parser.add_argument(
+        "--reference-time",
+        default=None,
+        help="ISO 8601 current time supplied to the planner",
+    )
     parser.add_argument("--task-id", default=f"reschedule-{uuid.uuid4().hex[:12]}")
     parser.add_argument("--execute", action="store_true", help="Apply after printing the resolved plan")
     args = parser.parse_args()
@@ -116,7 +96,21 @@ def main():
     try:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.task_id):
             raise ValueError("任务 ID 必须是 1–64 位 ASCII 字母、数字、下划线或连字符")
-        title, old_start, new_start = parse_notice(args.text, args.timezone)
+        plan_result, planner_used = plan_notice(
+            args.text, args.timezone, args.reference_time, args.planner, args.model,
+            timeout=args.timeout,
+        )
+        proof["planner"] = planner_used
+        proof["planner_result"] = plan_result
+        print(f"规划器：{planner_used}")
+        print(json.dumps(plan_result, ensure_ascii=False, indent=2))
+        if plan_result["status"] == "needs_confirmation":
+            print(f"需要确认：{plan_result['confirmation_question']}")
+            return_code = 2
+            raise PlanningPaused
+        if plan_result["status"] == "unsupported":
+            raise ValueError(f"当前不支持该任务：{plan_result['reasoning_summary']}")
+        title, old_start, new_start = ready_timestamps(plan_result)
         existing = read_status(args, args.task_id)
         if existing and existing.get("operation") == "reschedule":
             expected_new_end = new_start + existing["original_end_ms"] - existing["original_start_ms"]
@@ -169,6 +163,8 @@ def main():
                 print(json.dumps(report, ensure_ascii=False, indent=2))
                 print(f"撤销命令：python3 tools/quiet_cli.py undo --task-id {args.task_id}")
                 return_code = 0
+    except PlanningPaused:
+        pass
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         proof["error"] = str(error)
         print(f"error: {error}", file=sys.stderr)

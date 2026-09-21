@@ -39,12 +39,22 @@ python3 tools/quiet_cli.py undo --task-id move-demo
 python3 tools/quiet_cli.py cleanup --task-id weekly-demo
 ```
 
-The first parser is deliberately deterministic and accepts absolute dates only: ambiguity fails closed instead of asking a model to guess. It requires one exact match, permits only Agent-tagged demo events, preserves duration, compares the expected snapshot immediately before updating, reads back every field, and records evidence under ignored `work/notice-proofs/`. A schema-constrained model can replace only the parser after these execution invariants remain tested.
+By default, the command uses the deterministic absolute-date parser when model credentials are absent. To understand freer wording and relative dates, configure a model and select the schema-constrained planner:
+
+```bash
+export OPENAI_API_KEY="your project key"
+export OPENAI_MODEL="a Responses API model with Structured Outputs"
+python3 tools/notice_agent.py --calendar-id 1 --task-id move-natural-1 \
+  --planner openai --reference-time "2026-09-21T10:00:00+10:00" \
+  --text "把周三下午三点的项目周会改到周五下午四点"
+```
+
+This is still a preview until `--execute` is added. The model can only return a strict JSON plan: `ready`, `needs_confirmation`, or `unsupported`; it has no phone tools. A `ready` plan must then pass the existing deterministic executor checks: one exact event, Agent-owned marker, preserved duration, compare-before-write, independent read-back, and a local proof under ignored `work/notice-proofs/`. `auto` (the default) chooses the model only when both model variables exist; `--planner deterministic` always stays offline.
 
 ## Scope and decisions
 
 Validated on Android 15 emulator and Huawei Mate 40 Pro / HarmonyOS 4.2: create, independent read-back, same-ID replay, and guarded cleanup. Huawei blocked background broadcasts, so the debug bridge uses a synchronous ContentProvider call; it starts the app process without opening its Activity. The provider exists **only in debug builds**. Calendar writes are tagged by task ID; cleanup refuses to delete a record whose fields changed.
 
-This is not yet a free-form LLM planner or durable queue. The automated report proves the Agent Activity did not take foreground and independently checks the event; filmed typing remains the authority for uninterrupted input. Do not expose this debug bridge as a production API; a production transport needs proper authentication and scheduling. No model/API environment variables are required yet.
+This is not yet a durable queue or production transport. The automated report proves the Agent Activity did not take foreground and independently checks the event; filmed typing remains the authority for uninterrupted input. Do not expose this debug bridge as a production API; a production transport needs proper authentication and scheduling.
 
-Environment: `ANDROID_HOME` points to the Android SDK; `JAVA_HOME` points to JDK 17. The CLI uses `ANDROID_HOME/platform-tools/adb` or an `adb` on `PATH`. No secret environment variables are needed.
+Environment: `ANDROID_HOME` points to the Android SDK; `JAVA_HOME` points to JDK 17. The CLI uses `ANDROID_HOME/platform-tools/adb` or an `adb` on `PATH`. `OPENAI_API_KEY` and `OPENAI_MODEL` are optional and used only by the model planner; never commit the key.
