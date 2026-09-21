@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 import re
 import sys
+import threading
 import time
 import uuid
 
-from quiet_cli import PACKAGE, read_status, run_adb, send
+from quiet_cli import PACKAGE, run_adb, send_report
 
 
 PROOF_DIR = Path(__file__).resolve().parent.parent / "work" / "demo-proofs"
@@ -23,6 +24,18 @@ def foreground(args):
         output,
     )
     return match.group(1) if match else None
+
+
+def device_sample(args):
+    component = foreground(args)
+    output = run_adb(args, "shell", "dumpsys", "input_method").stdout
+    shown = re.findall(r"mInputShown=(true|false)", output)
+    requested = re.findall(r"mShowRequested=(true|false)", output)
+    return {
+        "foreground_component": component,
+        "keyboard_shown": shown[-1] == "true" if shown else None,
+        "keyboard_requested": requested[-1] == "true" if requested else None,
+    }
 
 
 def check_calendar(args):
@@ -100,6 +113,7 @@ def main():
             "foreground_after": None,
             "result": None,
             "independent_readback": None,
+            "ui_samples": None,
             "automated_checks_passed": False,
             "human_no_interruption_observation": "not_recorded",
         }
@@ -107,21 +121,49 @@ def main():
         print(f"在 {args.delay} 秒内拿起手机，打开聊天框并持续打字；电脑不会打开 Agent 界面。", flush=True)
         time.sleep(args.delay)
         print("发送任务…", flush=True)
-        exit_code = send(
-            args, "create", args.task_id,
-            {"calendar_id": args.calendar_id, "title": args.title,
-             "start_ms": start_ms, "minutes": args.minutes},
-        )
-        report = read_status(args, args.task_id)
+        samples = []
+        stop = threading.Event()
+
+        def sample_until_done():
+            while not stop.is_set():
+                try:
+                    samples.append(device_sample(args))
+                except RuntimeError:
+                    pass
+                stop.wait(0.15)
+
+        sampler = threading.Thread(target=sample_until_done, daemon=True)
+        sampler.start()
+        try:
+            report = send_report(
+                args, "create", args.task_id,
+                {"calendar_id": args.calendar_id, "title": args.title,
+                 "start_ms": start_ms, "minutes": args.minutes},
+            )
+        finally:
+            stop.set()
+            sampler.join(timeout=2)
+        samples.append(device_sample(args))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         proof["result"] = report
         proof["foreground_after"] = foreground(args)
-        if exit_code != 0 or not report or report.get("state") != "complete":
+        components = [sample["foreground_component"] for sample in samples if sample["foreground_component"]]
+        keyboard = [sample["keyboard_shown"] for sample in samples if sample["keyboard_shown"] is not None]
+        proof["ui_samples"] = {
+            "count": len(samples),
+            "foreground_components": list(dict.fromkeys(components)),
+            "agent_became_foreground": any(item.startswith(PACKAGE) for item in components),
+            "keyboard_visible_in_all_samples": all(keyboard) if keyboard else None,
+        }
+        if not report or report.get("state") != "complete":
             raise RuntimeError("Phone did not report a completed task")
         proof["independent_readback"] = independent_readback(args, report)
         if proof["foreground_after"] is None:
             raise RuntimeError("Unable to inspect the foreground app after execution")
         if proof["foreground_after"].startswith(PACKAGE):
             raise RuntimeError("Agent app became foreground")
+        if proof["ui_samples"]["agent_became_foreground"]:
+            raise RuntimeError("Agent app became foreground during execution")
         proof["automated_checks_passed"] = True
         print("独立回读通过；Agent 未成为前台应用。", flush=True)
         print("先在手机日历确认事件，再运行清理命令；本脚本不会自动删除事件。", flush=True)

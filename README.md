@@ -20,18 +20,9 @@ python3 tools/quiet_cli.py status --task-id demo-001
 python3 tools/quiet_cli.py cleanup --task-id demo-001
 ```
 
-For the filmed non-interference acceptance test, open a chat input on the phone, then run:
-
-```bash
-python3 tools/quiet_cli.py demo --task-id live-001 --calendar-id 1 \
-  --title "Background demo" --in-minutes 120 --minutes 30 --countdown 10
-```
-
-Keep typing through the countdown and task execution. The report records foreground-app and keyboard samples plus an independent calendar query. Video remains the authority for visible keyboard/input continuity. Inspect the created event, then clean it with `cleanup --task-id live-001`.
-
 Use a **new task ID** each time. For deduplication, repeat `create` with the same ID and the same fixed `--start` timestamp (`--in-minutes` recalculates on each run). The CLI defaults to the USB phone; add `--target emulator` for an emulator. It obtains a random token from the debug app's private storage via ADB `run-as`; no token is committed to Git.
 
-For a filmed simultaneous-use test, run `python3 tools/live_demo.py --calendar-id 1` while the phone is unlocked. You have 10 seconds to switch to a chat app and keep typing. The script checks the foreground app and independently reads every event field, saves a local record under ignored `work/demo-proofs/`, and prints a separate cleanup command. **Record the phone and terminal together; the automated record cannot prove the keyboard never flickered.**
+For a filmed simultaneous-use test, run `python3 tools/live_demo.py --calendar-id 1` while the phone is unlocked. You have 10 seconds to switch to a chat app and keep typing. The script samples the foreground app and keyboard during execution, independently reads every event field, saves a local record under ignored `work/demo-proofs/`, and prints a separate cleanup command. **Record the phone and terminal together; the automated record cannot prove the keyboard never flickered or that typing felt uninterrupted.**
 
 ## Scope and decisions
 
