@@ -167,7 +167,8 @@ def openai_plan(text, timezone, reference_time, model, api_key, timeout=30, url=
     payload = {
         "model": model,
         "store": False,
-        "max_output_tokens": 800,
+        "max_output_tokens": 4096,
+        "reasoning": {"effort": "minimal"},
         "instructions": (
             "你是手机日历任务规划器，只解析用户意图，绝不声称已经执行。"
             "当前执行器只支持把一个已有日历事件改期。标题、原时间或新时间只要有歧义，"
@@ -202,7 +203,15 @@ def openai_plan(text, timezone, reference_time, model, api_key, timeout=30, url=
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise RuntimeError(f"OpenAI API 请求失败：{error}") from error
     if response.get("status") not in {None, "completed"}:
-        raise RuntimeError(f"模型响应未完成：{response.get('status')}")
+        status = response.get("status", "unknown")
+        reason = (response.get("incomplete_details") or {}).get("reason")
+        output_tokens = (response.get("usage") or {}).get("output_tokens")
+        details = [value for value in (
+            f"reason={reason}" if reason else None,
+            f"output_tokens={output_tokens}" if output_tokens is not None else None,
+        ) if value]
+        suffix = f"（{', '.join(details)}）" if details else ""
+        raise RuntimeError(f"模型响应未完成：{status}{suffix}")
     try:
         plan = json.loads(_output_text(response))
     except json.JSONDecodeError as error:

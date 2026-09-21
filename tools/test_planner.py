@@ -58,8 +58,29 @@ class PlannerTest(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertTrue(payload["text"]["format"]["strict"])
         self.assertFalse(payload["store"])
+        self.assertEqual(payload["reasoning"]["effort"], "minimal")
+        self.assertEqual(payload["max_output_tokens"], 4096)
         self.assertEqual(payload["text"]["format"]["schema"]["additionalProperties"], False)
         self.assertNotIn("test-key", request.data.decode())
+
+    @mock.patch("planner.urllib.request.urlopen")
+    def test_incomplete_response_reports_safe_reason(self, urlopen):
+        urlopen.return_value = FakeResponse({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"output_tokens": 800},
+            "output": [],
+        })
+        with self.assertRaisesRegex(
+            RuntimeError, "incomplete.*reason=max_output_tokens.*output_tokens=800"
+        ):
+            openai_plan(
+                "把周三的项目周会改到周五下午四点",
+                "Australia/Sydney",
+                "2026-09-21T10:00:00+10:00",
+                "test-model",
+                "test-key",
+            )
 
     def test_needs_confirmation_requires_one_question(self):
         plan = dict(READY)
