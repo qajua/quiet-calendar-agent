@@ -45,11 +45,11 @@ By default, the command uses the deterministic absolute-date parser when model c
 export OPENAI_API_KEY="your project key"
 export OPENAI_MODEL="a Responses API model with Structured Outputs"
 python3 tools/notice_agent.py --calendar-id 1 --task-id move-natural-1 \
-  --planner openai --reference-time "2026-09-21T10:00:00+10:00" \
+  --planner openai --plan-only --reference-time "2026-09-21T10:00:00+10:00" \
   --text "把周三下午三点的项目周会改到周五下午四点"
 ```
 
-This is still a preview until `--execute` is added. The model can only return a strict JSON plan: `ready`, `needs_confirmation`, or `unsupported`; it has no phone tools. A `ready` plan must then pass the existing deterministic executor checks: one exact event, Agent-owned marker, preserved duration, compare-before-write, independent read-back, and a local proof under ignored `work/notice-proofs/`. `auto` (the default) chooses the model only when both model variables exist; `--planner deterministic` always stays offline.
+`--plan-only` stops before any ADB access. Without it, the command reads the phone to match one event but is still a non-writing preview until `--execute` is added. The model can only return a strict JSON plan: `ready`, `needs_confirmation`, or `unsupported`; it has no phone tools. A `ready` plan must then pass the existing deterministic executor checks: one exact event, Agent-owned marker, preserved duration, compare-before-write, independent read-back, and a local proof under ignored `work/notice-proofs/`. `auto` (the default) chooses the model only when both model variables exist; `--planner deterministic` always stays offline.
 
 ## Scope and decisions
 

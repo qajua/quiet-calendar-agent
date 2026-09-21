@@ -21,6 +21,10 @@ class PlanningPaused(Exception):
     """The plan needs one answer before any phone lookup or write is allowed."""
 
 
+class PlanOnlyComplete(Exception):
+    """The requested planner-only validation completed before any ADB access."""
+
+
 def read_field(args, event_id, column):
     result = run_adb(
         args, "shell", "content", "query", "--uri",
@@ -90,12 +94,18 @@ def main():
         help="ISO 8601 current time supplied to the planner",
     )
     parser.add_argument("--task-id", default=f"reschedule-{uuid.uuid4().hex[:12]}")
+    parser.add_argument(
+        "--plan-only", action="store_true",
+        help="Validate and print the plan, then stop before any ADB access",
+    )
     parser.add_argument("--execute", action="store_true", help="Apply after printing the resolved plan")
     args = parser.parse_args()
     proof = {"task_id": args.task_id, "notice": args.text, "timezone": args.timezone}
     try:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.task_id):
             raise ValueError("任务 ID 必须是 1–64 位 ASCII 字母、数字、下划线或连字符")
+        if args.plan_only and args.execute:
+            raise ValueError("--plan-only 与 --execute 不能同时使用")
         plan_result, planner_used = plan_notice(
             args.text, args.timezone, args.reference_time, args.planner, args.model,
             timeout=args.timeout,
@@ -111,6 +121,11 @@ def main():
         if plan_result["status"] == "unsupported":
             raise ValueError(f"当前不支持该任务：{plan_result['reasoning_summary']}")
         title, old_start, new_start = ready_timestamps(plan_result)
+        if args.plan_only:
+            proof["plan_only"] = True
+            print("规划结果校验通过；--plan-only 已在访问手机前停止。")
+            return_code = 0
+            raise PlanOnlyComplete
         existing = read_status(args, args.task_id)
         if existing and existing.get("operation") == "reschedule":
             expected_new_end = new_start + existing["original_end_ms"] - existing["original_start_ms"]
@@ -164,6 +179,8 @@ def main():
                 print(f"撤销命令：python3 tools/quiet_cli.py undo --task-id {args.task_id}")
                 return_code = 0
     except PlanningPaused:
+        pass
+    except PlanOnlyComplete:
         pass
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         proof["error"] = str(error)
