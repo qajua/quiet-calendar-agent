@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.Settings
+import android.content.Intent
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -34,9 +36,12 @@ class MainActivity : Activity() {
             textSize = 21f
         })
         page.addView(TextView(this).apply {
-            text = "先选择测试日历。本阶段只在你点击按钮后创建一条事件，并能回读和删除。"
+            text = "日历写入在后台完成。通知监听只接收电脑端白名单中的应用；审批在电脑控制台进行，不弹手机确认框。"
             textSize = 15f
         })
+        addButton(page, "打开通知使用权设置") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
         calendarPicker = Spinner(this)
         page.addView(calendarPicker)
         addButton(page, "1. 检查可写日历") { runWithPermissions { loadCalendars() } }

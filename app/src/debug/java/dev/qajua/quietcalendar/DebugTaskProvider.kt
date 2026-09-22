@@ -18,10 +18,23 @@ class DebugTaskProvider : ContentProvider() {
             store.bootstrap()
             return Bundle().apply { putString("status", "ready") }
         }
-        require(method in setOf("create", "cleanup", "reschedule", "undo")) { "Unknown command" }
+        require(method in setOf(
+            "create", "cleanup", "reschedule", "undo",
+            "notification_config", "notification_clear",
+        )) { "Unknown command" }
         val request = JSONObject(checkNotNull(arg) { "Missing JSON request" })
         val token = request.optString("bridge_token")
         check(store.authorize(token)) { "Unauthorized" }
+        if (method == "notification_config") {
+            val configured = NotificationInboxStore(checkNotNull(context)).configure(
+                request.getJSONArray("packages"),
+            )
+            return Bundle().apply { putString("report", configured.toString()) }
+        }
+        if (method == "notification_clear") {
+            NotificationInboxStore(checkNotNull(context)).clear()
+            return Bundle().apply { putString("report", "{\"state\":\"cleared\"}") }
+        }
         val taskId = request.getString("task_id")
         val commandId = request.getString("command_id")
         val action = when (method) {
