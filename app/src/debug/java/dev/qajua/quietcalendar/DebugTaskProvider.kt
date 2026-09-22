@@ -48,6 +48,7 @@ class DebugTaskProvider : ContentProvider() {
                 putExtra("expected_end_ms", request.getLong("expected_end_ms"))
                 putExtra("new_start_ms", request.getLong("new_start_ms"))
                 putExtra("new_end_ms", request.getLong("new_end_ms"))
+                putExtra("reminder_minutes", request.optInt("reminder_minutes", -1))
             }
         }
         store.handle(intent)

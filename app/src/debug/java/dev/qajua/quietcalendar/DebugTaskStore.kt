@@ -156,11 +156,15 @@ internal class DebugTaskStore(private val context: Context) {
         val oldEnd = intent.getLongExtra("expected_end_ms", -1L)
         val newStart = intent.getLongExtra("new_start_ms", -1L)
         val newEnd = intent.getLongExtra("new_end_ms", -1L)
+        val reminderMinutes = intent.getIntExtra("reminder_minutes", -1)
         require(eventId > 0 && calendarId > 0) { "Invalid event or calendar ID" }
         require(TASK_ID.matches(ownerTaskId)) { "Invalid owner task ID" }
         require(title.length in 1..200) { "Title must be 1–200 characters" }
         require(oldStart > 0 && oldEnd > oldStart && newStart > 0 && newEnd > newStart) {
             "Invalid original or new time range"
+        }
+        require(reminderMinutes == -1 || reminderMinutes in 0..10_080) {
+            "Reminder must be -1 or 0–10080 minutes"
         }
 
         val previous = read(id)
@@ -173,11 +177,15 @@ internal class DebugTaskStore(private val context: Context) {
                 previous.optLong("original_start_ms") == oldStart &&
                 previous.optLong("original_end_ms") == oldEnd &&
                 previous.optLong("start_ms") == newStart &&
-                previous.optLong("end_ms") == newEnd) { "Task ID was used with different fields" }
+                previous.optLong("end_ms") == newEnd &&
+                previous.optInt("reminder_minutes", -1) == reminderMinutes) {
+                "Task ID was used with different fields"
+            }
         }
 
         val eventMarker = marker(ownerTaskId)
         val alreadyUpdated = matches(eventId, calendarId, title, newStart, newEnd, eventMarker)
+        var updatedNow = false
         if (!alreadyUpdated) {
             check(matches(eventId, calendarId, title, oldStart, oldEnd, eventMarker)) {
                 "Event changed since planning; refusing to update"
@@ -188,8 +196,55 @@ internal class DebugTaskStore(private val context: Context) {
                 put(CalendarContract.Events.DTEND, newEnd)
             }
             check(resolver.update(uri, values, null, null) == 1) { "Calendar did not update the event" }
+            updatedNow = true
+        }
+        var reminderId: Long? = null
+        var reminderCreated = false
+        if (reminderMinutes >= 0) {
+            if (previous != null && previous.has("event_id")) {
+                reminderCreated = previous.optBoolean("reminder_created", false)
+                reminderId = if (reminderCreated) previous.optLong("reminder_id", -1L) else
+                    findReminder(eventId, reminderMinutes)
+                check(reminderId != null && reminderId > 0 &&
+                    reminderMatches(reminderId, eventId, reminderMinutes)) {
+                    "Reminder changed after task completion; refusing to replay"
+                }
+            } else {
+                reminderId = findReminder(eventId, reminderMinutes)
+                if (reminderId == null) {
+                    try {
+                        val values = ContentValues().apply {
+                            put(CalendarContract.Reminders.EVENT_ID, eventId)
+                            put(CalendarContract.Reminders.MINUTES, reminderMinutes)
+                            put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                        }
+                        val uri = checkNotNull(resolver.insert(CalendarContract.Reminders.CONTENT_URI, values)) {
+                            "Calendar refused reminder insertion"
+                        }
+                        reminderId = ContentUris.parseId(uri)
+                        reminderCreated = true
+                    } catch (error: Exception) {
+                        if (updatedNow) {
+                            val eventUri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+                            val rollback = ContentValues().apply {
+                                put(CalendarContract.Events.DTSTART, oldStart)
+                                put(CalendarContract.Events.DTEND, oldEnd)
+                            }
+                            check(resolver.update(eventUri, rollback, null, null) == 1) {
+                                "Reminder failed and event rollback also failed"
+                            }
+                        }
+                        throw error
+                    }
+                }
+            }
         }
         verify(eventId, calendarId, title, newStart, newEnd, eventMarker)
+        if (reminderMinutes >= 0) {
+            check(reminderId != null && reminderMatches(reminderId, eventId, reminderMinutes)) {
+                "Reminder read-back failed"
+            }
+        }
         write(id, JSONObject().apply {
             put("task_id", id)
             put("command_id", commandId)
@@ -203,6 +258,9 @@ internal class DebugTaskStore(private val context: Context) {
             put("original_end_ms", oldEnd)
             put("start_ms", newStart)
             put("end_ms", newEnd)
+            put("reminder_minutes", reminderMinutes)
+            put("reminder_created", reminderCreated)
+            if (reminderId != null) put("reminder_id", reminderId)
             put("replayed", alreadyUpdated)
         })
     }
@@ -224,7 +282,17 @@ internal class DebugTaskStore(private val context: Context) {
         val oldEnd = previous.getLong("original_end_ms")
         val newStart = previous.getLong("start_ms")
         val newEnd = previous.getLong("end_ms")
+        val reminderMinutes = previous.optInt("reminder_minutes", -1)
+        val reminderCreated = previous.optBoolean("reminder_created", false)
+        val reminderId = previous.optLong("reminder_id", -1L)
+        if (reminderCreated) {
+            check(reminderId > 0 && reminderMinutes >= 0 &&
+                reminderMatches(reminderId, eventId, reminderMinutes)) {
+                "Agent-created reminder changed; refusing to undo"
+            }
+        }
         val alreadyUndone = matches(eventId, calendarId, title, oldStart, oldEnd, eventMarker)
+        var restoredNow = false
         if (!alreadyUndone) {
             check(matches(eventId, calendarId, title, newStart, newEnd, eventMarker)) {
                 "Event changed after rescheduling; refusing to undo"
@@ -235,8 +303,30 @@ internal class DebugTaskStore(private val context: Context) {
                 put(CalendarContract.Events.DTEND, oldEnd)
             }
             check(resolver.update(uri, values, null, null) == 1) { "Calendar did not undo the update" }
+            restoredNow = true
+        }
+        if (reminderCreated) {
+            val reminderUri = ContentUris.withAppendedId(CalendarContract.Reminders.CONTENT_URI, reminderId)
+            try {
+                check(resolver.delete(reminderUri, null, null) == 1) { "Calendar did not delete the reminder" }
+            } catch (error: Exception) {
+                if (restoredNow) {
+                    val eventUri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+                    val rollback = ContentValues().apply {
+                        put(CalendarContract.Events.DTSTART, newStart)
+                        put(CalendarContract.Events.DTEND, newEnd)
+                    }
+                    check(resolver.update(eventUri, rollback, null, null) == 1) {
+                        "Reminder undo failed and event rollback also failed"
+                    }
+                }
+                throw error
+            }
         }
         verify(eventId, calendarId, title, oldStart, oldEnd, eventMarker)
+        if (reminderCreated) check(!reminderMatches(reminderId, eventId, reminderMinutes)) {
+            "Reminder still exists after undo"
+        }
         previous.put("state", "undone")
         previous.put("command_id", commandId)
         previous.put("replayed", alreadyUndone)
@@ -258,6 +348,38 @@ internal class DebugTaskStore(private val context: Context) {
             return id
         }
         return null
+    }
+
+    private fun findReminder(eventId: Long, minutes: Int): Long? {
+        resolver.query(
+            CalendarContract.Reminders.CONTENT_URI,
+            arrayOf(CalendarContract.Reminders._ID),
+            "${CalendarContract.Reminders.EVENT_ID}=? AND ${CalendarContract.Reminders.MINUTES}=? AND " +
+                "${CalendarContract.Reminders.METHOD}=?",
+            arrayOf(
+                eventId.toString(), minutes.toString(),
+                CalendarContract.Reminders.METHOD_ALERT.toString(),
+            ),
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) return cursor.getLong(0)
+        }
+        return null
+    }
+
+    private fun reminderMatches(reminderId: Long, eventId: Long, minutes: Int): Boolean {
+        val uri = ContentUris.withAppendedId(CalendarContract.Reminders.CONTENT_URI, reminderId)
+        return resolver.query(
+            uri,
+            arrayOf(
+                CalendarContract.Reminders.EVENT_ID, CalendarContract.Reminders.MINUTES,
+                CalendarContract.Reminders.METHOD,
+            ),
+            null, null, null,
+        )?.use { cursor ->
+            cursor.moveToFirst() && cursor.getLong(0) == eventId && cursor.getInt(1) == minutes &&
+                cursor.getInt(2) == CalendarContract.Reminders.METHOD_ALERT
+        } ?: false
     }
 
     private fun verify(
