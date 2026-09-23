@@ -4,10 +4,16 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from control_center import ControlState
+from control_center import ControlState, PAGE
 
 
 class ControlStateTest(unittest.TestCase):
+    def test_dashboard_preserves_task_output_scroll_position(self):
+        self.assertIn("const outputScrollPositions=new Map()", PAGE)
+        self.assertIn("box.dataset.taskId=t.id", PAGE)
+        self.assertIn("captureOutputScroll(root);root.replaceChildren()", PAGE)
+        self.assertIn("requestAnimationFrame(()=>restoreOutputScroll(root))", PAGE)
+
     def test_ingest_classifies_and_deduplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             state = ControlState(Path(directory) / "state.json")
