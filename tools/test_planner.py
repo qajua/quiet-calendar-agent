@@ -6,7 +6,14 @@ import unittest
 import urllib.error
 from unittest import mock
 
-from planner import _safe_http_error, openai_plan, plan_notice, ready_timestamps, validate_plan
+from planner import (
+    PLANNER_INSTRUCTIONS,
+    _safe_http_error,
+    openai_plan,
+    plan_notice,
+    ready_timestamps,
+    validate_plan,
+)
 
 
 READY = {
@@ -62,6 +69,13 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(payload["max_output_tokens"], 4096)
         self.assertEqual(payload["text"]["format"]["schema"]["additionalProperties"], False)
         self.assertNotIn("test-key", request.data.decode())
+
+    def test_prompt_resolves_qualified_week_but_not_bare_weekday(self):
+        self.assertIn("本周三下午三点", PLANNER_INSTRUCTIONS)
+        self.assertIn("必须返回 ready", PLANNER_INSTRUCTIONS)
+        self.assertIn("不得要求用户确认计算结果", PLANNER_INSTRUCTIONS)
+        self.assertIn("不要询问日历中是否存在事件或是否唯一", PLANNER_INSTRUCTIONS)
+        self.assertIn("询问是哪一周", PLANNER_INSTRUCTIONS)
 
     @mock.patch("planner.urllib.request.urlopen")
     def test_incomplete_response_reports_safe_reason(self, urlopen):

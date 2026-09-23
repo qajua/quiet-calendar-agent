@@ -35,6 +35,34 @@ PLAN_SCHEMA = {
     ],
 }
 
+PLANNER_INSTRUCTIONS = """你是手机日历任务规划器，只解析用户意图，绝不声称已经执行。
+当前执行器只支持把一个已有日历事件改期。
+
+# 职责边界
+- 你只负责提取事件标题、原开始时间和新开始时间。
+- 不要询问日历中是否存在事件或是否唯一；后续确定性执行器会查询日历并验证唯一匹配。
+- 用户明确给出事件标题时，直接提取该标题，不要要求再次确认。
+
+# 时间解析规则
+- reference_time_iso 和 timezone 是可信且权威的时间基准。
+- “本周”是 reference_time_iso 所在的自然周，即周一 00:00 到周日 23:59。
+- “下周”是紧接着本周的下一个自然周。
+- 根据“本周/下周 + 星期 + 时间”能够唯一计算日期时，必须返回 ready；不得要求用户确认计算结果。
+- 只有缺少周次限定而无法唯一确定日期（例如只说“周三”），或缺少具体时刻时，才返回 needs_confirmation。
+- ready 中的时间必须是应用 timezone 后、带正确 UTC 偏移的 ISO 8601。
+
+# 输出决策
+- 标题、原时间和新时间都能按上述规则唯一确定：返回 ready。
+- 其中任何一项确实无法唯一确定：返回 needs_confirmation，并且只问一个最关键的问题。
+- 不是改期任务：返回 unsupported。
+
+# 示例
+- reference_time_iso 为 2026-09-21T10:00:00+10:00，输入“把本周三下午三点的项目周会改到本周五下午四点”：
+  返回 ready；标题为“项目周会”，原时间为 2026-09-23T15:00:00+10:00，新时间为 2026-09-25T16:00:00+10:00。
+- 同一参考时间，输入“把周三下午三点的项目周会改到周五下午四点”：
+  返回 needs_confirmation，询问是哪一周。
+"""
+
 
 def parse_notice(text, timezone):
     """Deterministic absolute-date parser retained as the offline/fail-closed path."""
@@ -169,12 +197,7 @@ def openai_plan(text, timezone, reference_time, model, api_key, timeout=30, url=
         "store": False,
         "max_output_tokens": 4096,
         "reasoning": {"effort": "minimal"},
-        "instructions": (
-            "你是手机日历任务规划器，只解析用户意图，绝不声称已经执行。"
-            "当前执行器只支持把一个已有日历事件改期。标题、原时间或新时间只要有歧义，"
-            "就返回 needs_confirmation，并且只问一个最关键的问题。不要猜测。"
-            "所有 ready 时间必须是带 UTC 偏移的 ISO 8601。无法支持的动作返回 unsupported。"
-        ),
+        "instructions": PLANNER_INSTRUCTIONS,
         "input": json.dumps({
             "user_notice": text,
             "reference_time_iso": reference.isoformat(),
